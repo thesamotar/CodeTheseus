@@ -1,6 +1,9 @@
-/* ===== app.js — Wired to real backend at http://127.0.0.1:8000 ===== */
+/* ===== app.js — Wired to backend (auto-detects Vercel or local) ===== */
 
-const API = 'http://127.0.0.1:8000';
+// Auto-detect API URL: use relative path for Vercel, localhost for local dev
+const API = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+    ? 'http://127.0.0.1:8000'
+    : '/api';
 
 // ── State ──────────────────────────────────────────────────────────────────
 const state = {

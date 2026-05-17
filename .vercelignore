@@ -1,0 +1,71 @@
+# Vercel Ignore File
+# Files and directories to exclude from deployment
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+
+# Logs
+logs/
+*.log
+
+# Database
+chroma_db/
+*.db
+*.sqlite
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Testing
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Documentation (not needed in production)
+bob_sessions/
+*.md
+!README.md
+!VERCEL_DEPLOYMENT.md
+
+# Demo files
+demo.py
+quickstart.py
+cli.py
+
+# Sample data
+sample_repo/
+demo_repository/
+
+# Git
+.git/
+.gitignore
+
+# Environment
+.env
+.env.local
+.env.example
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Node modules (if any)
+node_modules/
+
+# OS files
+.DS_Store
+Thumbs.db

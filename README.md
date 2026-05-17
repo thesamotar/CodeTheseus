@@ -4,6 +4,12 @@ A production-ready AI-powered code generation system that **enforces determinist
 
 **Made using IBM Bob**
 
+## 🚀 Quick Deploy
+
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/YOUR_USERNAME/CodeReuse&env=HUGGINGFACE_API_TOKEN&envDescription=Hugging%20Face%20API%20token%20for%20IBM%20Granite&envLink=https://huggingface.co/settings/tokens)
+
+**One-click deployment to Vercel** - See [VERCEL_DEPLOYMENT.md](./VERCEL_DEPLOYMENT.md) for details.
+
 ## 🎯 Core Innovation
 
 **Dual-phase verification** (namespace checking + structural similarity) with rolling subtask context management ensures generated code reuses existing functions instead of duplicating logic.
