@@ -1,17 +1,192 @@
 """
-Vector Database Manager using ChromaDB for semantic code search.
+Vector Database Manager using in-memory store + HuggingFace Inference API
+for semantic code search.
+
+Replaces local sentence-transformers + chromadb to stay within Vercel's
+500 MB serverless bundle limit.
 """
 
-import chromadb
-from chromadb.config import Settings
+import os
+import json
+import requests
+import numpy as np
 from pathlib import Path
 from typing import List, Optional, Dict, Any
-from sentence_transformers import SentenceTransformer
 from src.models.data_models import FunctionNode, SearchResult, EmbeddingMetadata
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# ---------------------------------------------------------------------------
+# Lightweight Embedding Client — calls HuggingFace Inference API
+# ---------------------------------------------------------------------------
+
+class HFEmbeddingClient:
+    """Generate embeddings via the HuggingFace Inference API."""
+
+    API_URL = "https://api-inference.huggingface.co/pipeline/feature-extraction/{model}"
+
+    def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
+        self.model_name = model_name
+        self.api_url = self.API_URL.format(model=model_name)
+        self.token = os.getenv("HUGGINGFACE_API_TOKEN", "")
+        self.headers = {}
+        if self.token:
+            self.headers["Authorization"] = f"Bearer {self.token}"
+
+    def encode(self, texts, show_progress_bar: bool = False):
+        """
+        Encode one or more texts into embeddings.
+
+        Args:
+            texts: A string or list of strings.
+            show_progress_bar: Ignored (kept for API compat).
+
+        Returns:
+            numpy array of shape (n, dim).
+        """
+        if isinstance(texts, str):
+            texts = [texts]
+
+        # HF Inference API accepts a list of strings
+        payload = {"inputs": texts, "options": {"wait_for_model": True}}
+        response = requests.post(
+            self.api_url,
+            headers=self.headers,
+            json=payload,
+            timeout=120,
+        )
+
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"HF Inference API error {response.status_code}: {response.text}"
+            )
+
+        embeddings = response.json()
+        return np.array(embeddings, dtype=np.float32)
+
+
+# ---------------------------------------------------------------------------
+# In-memory Vector Store — replaces ChromaDB
+# ---------------------------------------------------------------------------
+
+class InMemoryVectorStore:
+    """Simple in-memory vector store with cosine-similarity search."""
+
+    def __init__(self):
+        self._ids: List[str] = []
+        self._embeddings: List[np.ndarray] = []
+        self._documents: List[str] = []
+        self._metadatas: List[Dict[str, Any]] = []
+
+    # -- mutation ----------------------------------------------------------
+
+    def upsert(
+        self,
+        ids: List[str],
+        embeddings: List[List[float]],
+        documents: List[str],
+        metadatas: List[Dict[str, Any]],
+    ):
+        for i, uid in enumerate(ids):
+            emb = np.array(embeddings[i], dtype=np.float32)
+            if uid in self._ids:
+                idx = self._ids.index(uid)
+                self._embeddings[idx] = emb
+                self._documents[idx] = documents[i]
+                self._metadatas[idx] = metadatas[i]
+            else:
+                self._ids.append(uid)
+                self._embeddings.append(emb)
+                self._documents.append(documents[i])
+                self._metadatas.append(metadatas[i])
+
+    def add(self, ids, embeddings, documents, metadatas):
+        self.upsert(ids, embeddings, documents, metadatas)
+
+    def delete(self, ids: Optional[List[str]] = None, where: Optional[Dict] = None):
+        if ids:
+            for uid in ids:
+                if uid in self._ids:
+                    idx = self._ids.index(uid)
+                    self._ids.pop(idx)
+                    self._embeddings.pop(idx)
+                    self._documents.pop(idx)
+                    self._metadatas.pop(idx)
+        elif where:
+            to_remove = []
+            for idx, meta in enumerate(self._metadatas):
+                if all(meta.get(k) == v for k, v in where.items()):
+                    to_remove.append(idx)
+            for idx in reversed(to_remove):
+                self._ids.pop(idx)
+                self._embeddings.pop(idx)
+                self._documents.pop(idx)
+                self._metadatas.pop(idx)
+
+    # -- query -------------------------------------------------------------
+
+    def query(
+        self,
+        query_embeddings: List[List[float]],
+        n_results: int = 10,
+        where: Optional[Dict] = None,
+    ) -> Dict[str, Any]:
+        if not self._embeddings:
+            return {"ids": [[]], "distances": [[]], "metadatas": [[]], "documents": [[]]}
+
+        q = np.array(query_embeddings[0], dtype=np.float32)
+        q_norm = q / (np.linalg.norm(q) + 1e-10)
+
+        scores = []
+        for idx, emb in enumerate(self._embeddings):
+            if where:
+                meta = self._metadatas[idx]
+                if not all(meta.get(k) == v for k, v in where.items()):
+                    continue
+            e_norm = emb / (np.linalg.norm(emb) + 1e-10)
+            sim = float(np.dot(q_norm, e_norm))
+            distance = 1.0 - sim  # cosine distance
+            scores.append((idx, distance))
+
+        scores.sort(key=lambda x: x[1])
+        top = scores[:n_results]
+
+        result_ids = [self._ids[i] for i, _ in top]
+        result_distances = [d for _, d in top]
+        result_metadatas = [self._metadatas[i] for i, _ in top]
+        result_documents = [self._documents[i] for i, _ in top]
+
+        return {
+            "ids": [result_ids],
+            "distances": [result_distances],
+            "metadatas": [result_metadatas],
+            "documents": [result_documents],
+        }
+
+    def get(self, where: Optional[Dict] = None) -> Dict[str, Any]:
+        if where:
+            indices = [
+                i
+                for i, m in enumerate(self._metadatas)
+                if all(m.get(k) == v for k, v in where.items())
+            ]
+        else:
+            indices = list(range(len(self._ids)))
+
+        return {
+            "ids": [self._ids[i] for i in indices],
+            "metadatas": [self._metadatas[i] for i in indices],
+            "documents": [self._documents[i] for i in indices],
+        }
+
+    def count(self) -> int:
+        return len(self._ids)
+
+
+# ---------------------------------------------------------------------------
+# VectorDBManager — public API unchanged
+# ---------------------------------------------------------------------------
 
 class VectorDBManager:
     """Manage vector embeddings and similarity search for code functions."""
@@ -37,39 +212,14 @@ class VectorDBManager:
         self.model_name = model_name
         self.dimension = dimension
         
-        # Initialize embedding model
-        logger.info(f"Loading embedding model: {model_name}")
-        try:
-            self.embedder = SentenceTransformer(model_name)
-        except Exception as e:
-            logger.warning(f"Failed to load {model_name}, falling back to all-MiniLM-L6-v2: {e}")
-            self.embedder = SentenceTransformer('all-MiniLM-L6-v2')
+        # Initialize embedding client (HF Inference API)
+        hf_model = f"sentence-transformers/{model_name}" if "/" not in model_name else model_name
+        logger.info(f"Using HF Inference API for embeddings: {hf_model}")
+        self.embedder = HFEmbeddingClient(model_name=hf_model)
         
-        # Initialize ChromaDB
-        self._init_chromadb()
-    
-    def _init_chromadb(self):
-        """Initialize ChromaDB client and collection."""
-        Path(self.persist_directory).mkdir(parents=True, exist_ok=True)
-        
-        self.client = chromadb.PersistentClient(
-            path=self.persist_directory,
-            settings=Settings(
-                anonymized_telemetry=False,
-                allow_reset=True
-            )
-        )
-        
-        # Get or create collection
-        try:
-            self.collection = self.client.get_collection(name=self.collection_name)
-            logger.info(f"Loaded existing collection: {self.collection_name}")
-        except Exception:
-            self.collection = self.client.create_collection(
-                name=self.collection_name,
-                metadata={"hnsw:space": "cosine"}
-            )
-            logger.info(f"Created new collection: {self.collection_name}")
+        # Initialize in-memory vector store
+        self.collection = InMemoryVectorStore()
+        logger.info(f"Initialized in-memory vector store: {collection_name}")
     
     def add_functions(self, functions: List[FunctionNode], batch_size: int = 32):
         """
@@ -98,7 +248,7 @@ class VectorDBManager:
             # Get textified representation for embedding
             documents.append(func.get_textified())
             
-            # Store metadata (convert lists to strings for ChromaDB compatibility)
+            # Store metadata (convert lists to strings for compatibility)
             metadata = {
                 "function_name": func.name,
                 "file_path": func.file_path,
@@ -120,7 +270,7 @@ class VectorDBManager:
             embeddings = self.embedder.encode(batch, show_progress_bar=False)
             all_embeddings.extend(embeddings.tolist())
         
-        # Add to ChromaDB - use upsert to avoid duplicate warnings
+        # Add to in-memory store
         try:
             self.collection.upsert(
                 ids=ids,
@@ -166,9 +316,9 @@ class VectorDBManager:
         # Generate query embedding
         query_embedding = self.embedder.encode(query, show_progress_bar=False).tolist()
         
-        # Search in ChromaDB
+        # Search in vector store
         results = self.collection.query(
-            query_embeddings=[query_embedding],
+            query_embeddings=[query_embedding[0] if isinstance(query_embedding[0], list) else query_embedding],
             n_results=top_k,
             where=filter_dict
         )
@@ -181,7 +331,7 @@ class VectorDBManager:
             return search_results
         
         for i, func_id in enumerate(results['ids'][0]):
-            # Calculate similarity score (ChromaDB returns distances, convert to similarity)
+            # Calculate similarity score (distances are cosine distances)
             distance = results['distances'][0][i]
             similarity = 1 - distance  # Cosine distance to similarity
             
@@ -358,8 +508,7 @@ class VectorDBManager:
     
     def reset(self):
         """Reset the vector database (delete all data)."""
-        self.client.delete_collection(name=self.collection_name)
-        self._init_chromadb()
+        self.collection = InMemoryVectorStore()
         logger.info("Vector database reset")
 
 # Made with Bob

@@ -1,4 +1,4 @@
-"""Quiet logger configuration for demo - suppresses verbose ChromaDB warnings."""
+"""Quiet logger configuration for demo - suppresses verbose warnings."""
 
 import warnings
 import logging
@@ -7,14 +7,10 @@ import os
 def setup_quiet_mode():
     """Configure logging to suppress verbose output during demo."""
     
-    # Suppress ChromaDB warnings
-    warnings.filterwarnings('ignore', category=UserWarning, module='chromadb')
-    
-    # Suppress specific loggers
-    logging.getLogger('chromadb').setLevel(logging.ERROR)
-    logging.getLogger('chromadb.telemetry').setLevel(logging.CRITICAL)
-    logging.getLogger('sentence_transformers').setLevel(logging.ERROR)
-    logging.getLogger('transformers').setLevel(logging.ERROR)
+    # Suppress noisy library loggers
+    logging.getLogger('httpx').setLevel(logging.ERROR)
+    logging.getLogger('httpcore').setLevel(logging.ERROR)
+    logging.getLogger('urllib3').setLevel(logging.ERROR)
     
     # Suppress HuggingFace warnings
     os.environ['TRANSFORMERS_VERBOSITY'] = 'error'
